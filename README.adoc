@@ -1,0 +1,89 @@
+= create_swamp_archive
+James A. Kupsch
+Version 1.0.0, {docdatetime}
+//:toc:
+//:sectnums:
+
+
+== Introduction ==
+
+The script create_swamp_archive assists developers with archiving their code
+for assessments with the Software Assurance Marketplace (SWAMP).
+The script is useful for archiving a directory that is being used for active
+development where builds have been performed.
+Directly archiving such a directory with _tar_ or _zip_ is not suitable for
+use with the SWAMP, as when the software is built in the SWAMP, nothing will build
+and therefore nothing will be assessed as the SWAMP only assesses files that are
+built.
+The created archive will not include any of the intermediate build files, so
+they will be rebuilt.
+If you have a clean directory (has not been built or the built files have been
+removed), then it is recommended to archive the directory using _tar_ or _zip_.
+
+This script requires Perl and GNU tar to be installed on the machine where the
+script will be used. 
+
+== Usage ==
+
+The documentation for create_swamp_archive can be found be running `create_swamp_archive`
+with the `--help` option as shown below.
+
+.Output of the `create_swamp_archive --help` command.
+----
+Usage: create_swamp_archive [<options>] <dir-to-tar> [<dir> | <tar-prefix> | <tar-file>]
+<options>:
+    --exclude        -e  glob pattern to exclude
+    --include        -i  glob pattern to remove from the exclude list
+    --no-ts              do not include timestamp in archive name
+    --use-utc-ts         use UTC timestamp instead of local time
+    --force          -f  overwrite archive if it exists
+    --help           -h  print this message and exit
+    --help-excludes      list exclude patterns and exit
+    --version        -v  print version and exit
+    --silent         -s  do not print the archive path
+    --verbose        -V  print operational details
+
+Creates an archive of the <dir-to-tar> directory specified suitable for upload
+to the Software Assurance Marketplace (SWAMP) without having to clean the
+directory before archiving.  The script would typically be used as:
+
+    create_swamp_archive my-package
+
+The output of the command is the path to the archive such as
+
+    my-package-20170929T141901.tar.gz
+
+Files matching final and intermediate build files such as object files and
+libraries are excluded, as are document files, archives, and version control
+files (--help-exclude list the exact file patterns excluded).  The options
+--exclude and --include can be used to modify the patterns excluded.  They can
+be specified multiple times.  Exclude patterns support standard shell glob
+constructs '*' (match any number of characters), '?' (match a single
+character), '[abc]' (match a single character inside the braces).  An include
+pattern must exactly match an exclude patterns, it can not be used include a
+subset of the excluded files.  These characters must be quoted to prevent
+interpretation by the shell.  The command line to include .rpm files and
+additionally exclude .csv files would be
+
+    create_swamp_archive --include='*.rpm' --exclude='*.csv' my-package
+
+By default the archive is written to the current directory if the second
+argument is not specified.  The name of the archive is formed by appending the
+name of the directory to be archived, the current time stamp in local time, and
+the archive extension.  Options are available to exclude the timestamp or make
+it be UTC.  If the second argument is specified the archive name is determined
+by the first matching case:
+
+- <dir> is an existing directory:  the archive is placed in the <dir> using the
+    previously algorithm for the name.
+- <tar-prefix> is a prefix for the archive name that does not contain a '.'
+    character:  the archive is path is formed using the previous algorithm,
+  except <tar-prefix> is used in place of the directory name
+- <tar-file> contains a '.' character and used without change for the archive
+    path:  the archive must contain a valid archive extension such at '.tar',
+  '.tar.gz', '.tar.bz2', or '.tar.xz'.
+
+For more information about the SWAMP, visit the site:
+
+    https://www.continuousassurance.org
+----

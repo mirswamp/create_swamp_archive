@@ -1,0 +1,517 @@
+#!/usr/bin/perl -w
+
+#
+#  create_swamp_archive
+# 
+#  Copyright 2017 James A. Kupsch
+# 
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+# 
+#      http://www.apache.org/licenses/LICENSE-2.0
+# 
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# 
+
+use strict;
+use Getopt::Long;
+use FindBin;
+use Cwd;
+use Config;
+
+my $version = '1.0.0';
+
+# default exclude patterns
+#
+my @buildFileExts	= qw/ o obj a so lib lo la dll exe class jar war ear rpm deb udeb /;
+my @archiveExts		= qw/ tar tgz gz bz bz2 taz tbz tz2 tbz2 lz lzma lzo xz Z zip /;
+my @docExts		= qw/ pdf doc docx ppt pptx xls xlsx /;
+my @vcsFiles		= qw/ CVS RCS SCCS .git .gitignore .gitmodules .gitattributes
+			    .cvsignore .svn .arch-ids {arch} =RELEASE-ID
+			    =meta-update =update .bzr .bzrignore .bztags .hg
+			    .hgignore .hgrags _darcs /;
+my @otherExcludeFiles	= ( '*,v', '#*#', '.#*', qw/ *~ .*.swp .ccache .libs .deps / );
+
+my @excludeExts		= ( @buildFileExts, @archiveExts, @docExts );
+my @excludeFiles	= ( @vcsFiles, @otherExcludeFiles );
+my @excludes		= ( @excludeFiles, map { "*.$_"} @excludeExts );
+
+# valid archive types
+#
+my %tarExtToFlags	= (	'.tar'		=> [],
+				'.tar.gz'	=> [ '-z' ],
+				'.tgz'		=> [ '-z' ],
+				'.tar.Z'	=> [ '-Z' ],
+				'.tar.bz2'	=> [ '-j' ],
+				'.tbz2'		=> [ '-j' ],
+				'.tz2'		=> [ '-j' ],
+				'.tar.xz'	=> [ '-J' ],
+			    );
+my $tarExtPat = '(' . (join '|', map { "\Q$_\E" } keys %tarExtToFlags) . ')$';
+
+# set if the archive was successfully created, used to unlink on failure
+#
+my $tarPathCreated;
+
+
+# Turn Exec Command array into a quoted Bash compatible string
+#
+my $bashNonMetaChars = qr/[a-zA-Z0-9.,_=+\/\@:-]/;
+
+sub HasBashMetaChars
+{
+    my $s = shift;
+    return ($s !~ /^$bashNonMetaChars*$/);
+}
+
+
+sub BashQuote
+{
+    my $s = shift;
+
+    my @a = split /(')/, $s;
+    foreach (@a)  {
+	if (HasBashMetaChars($_))  {
+	    if ($_ eq "'")  {
+		$_ = "\\'";
+	    }  else  {
+		$_ = "'$_'";
+	    }
+	}
+    }
+    return join('', @a);
+}
+
+
+sub GetCmdString
+{
+    my $cmd = shift;
+    my $s = join ' ', map {BashQuote $_} @$cmd;
+
+    return $s;
+}
+
+
+# FailAndExit
+#
+# print msg and exit with exitCode (default value of 1)
+#
+sub FailAndExit
+{
+    my ($msg, $exitCode) = @_;
+
+    $msg .= "\n" unless $msg =~ /\n$/;
+    $exitCode = 1 unless defined $exitCode;
+
+    my $programName = $FindBin::Script;
+
+    print STDERR  "$programName:  ERROR, $msg\n"
+		. "    For usage execute:  $programName --help\n\n";
+    
+    if (defined $tarPathCreated)  {
+	unlink $tarPathCreated or print STDERR "unlink $tarPathCreated: $!\n";
+	undef $tarPathCreated;
+    }
+
+    exit $exitCode;
+}
+
+
+# Create an empty tar file to prevent tar from failing if the archive is placed
+# in the directory being archived
+#
+sub CreateTarPath
+{
+    my ($path) = @_;
+
+    open FILE, ">", $path or FailAndExit("Failed to create or truncate Archive '$path'");
+    close FILE or FailAndExit("Failed to create or truncate Archive '$path'");
+
+    $tarPathCreated = $path;
+}
+
+
+sub PrintUsage
+{
+    my $programName = $FindBin::Script;
+    
+    print <<EOF;
+Usage: $programName [<options>] <dir-to-tar> [<dir> | <tar-prefix> | <tar-file>]
+<options>:
+    --exclude        -e  glob pattern to exclude
+    --include        -i  glob pattern to remove from the exclude list
+    --no-ts              do not include timestamp in archive name
+    --use-utc-ts         use UTC timestamp instead of local time
+    --force          -f  overwrite archive if it exists
+    --help           -h  print this message and exit
+    --help-excludes      list exclude patterns and exit
+    --version        -v  print version and exit
+    --silent         -s  do not print the archive path
+    --verbose        -V  print operational details
+
+Creates an archive of the <dir-to-tar> directory specified suitable for upload
+to the Software Assurance Marketplace (SWAMP) without having to clean the
+directory before archiving.  The script would typically be used as:
+
+    $programName my-package
+
+The output of the command is the path to the archive such as
+
+    my-package-20170929T141901.tar.gz
+
+Files matching final and intermediate build files such as object files and
+libraries are excluded, as are document files, archives, and version control
+files (--help-exclude list the exact file patterns excluded).  The options
+--exclude and --include can be used to modify the patterns excluded.  They can
+be specified multiple times.  Exclude patterns support standard shell glob
+constructs '*' (match any number of characters), '?' (match a single
+character), '[abc]' (match a single character inside the braces).  An include
+pattern must exactly match an exclude patterns, it can not be used include a
+subset of the excluded files.  These characters must be quoted to prevent
+interpretation by the shell.  The command line to include .rpm files and
+additionally exclude .csv files would be
+
+    $programName --include='*.rpm' --exclude='*.csv' my-package
+
+By default the archive is written to the current directory if the second
+argument is not specified.  The name of the archive is formed by appending the
+name of the directory to be archived, the current time stamp in local time, and
+the archive extension.  Options are available to exclude the timestamp or make
+it be UTC.  If the second argument is specified the archive name is determined
+by the first matching case:
+
+- <dir> is an existing directory:  the archive is placed in the <dir> using the
+  previously algorithm for the name.
+- <tar-prefix> is a prefix for the archive name that does not contain a '.'
+  character:  the archive is path is formed using the previous algorithm,
+  except <tar-prefix> is used in place of the directory name
+- <tar-file> contains a '.' character and used without change for the archive
+  path:  the archive must contain a valid archive extension such at '.tar',
+  '.tar.gz', '.tar.bz2', or '.tar.xz'.
+
+For more information about the SWAMP, visit the site:
+
+    https://www.continuousassurance.org
+
+EOF
+
+}
+
+
+sub PrintVersion
+{
+    print "$version\n";
+}
+
+
+# GetTsString
+#
+# Format the timestamp given a localtime/gmtime list as a string
+#
+sub GetTsString
+{
+    my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = @_;
+
+    my $s = sprintf "%04d%02d%02dT%02d%02d%02d", 1900 + $year, $mon + 1, $mday, $hour, $min, $sec;
+
+    return $s;
+}
+
+
+# GetTarFilename
+#
+# Create the path to the tar file, given the tar-file argument and options.
+#
+sub GetTarFilename
+{
+    my ($tarFileArg, $dirName, $options) = @_;
+    my $tarFile;
+
+    my $prefix;
+    if (!defined $tarFileArg)  {
+	# if tar-file not specified use the dirName
+	$prefix = $dirName;
+    }  elsif (-d $tarFileArg)  {
+	# if tar-file specified and is a directory, use the dirName, but place
+	# in the directory
+	$prefix = "$tarFileArg/$dirName";
+    }  elsif ($tarFileArg !~ /\./)  {
+	# if the tar-file argument does not contain a '.' use it instead of
+	# the directory
+	$prefix = $tarFileArg;
+    }  else  {
+	# use the tar-file as is
+	$tarFile = $tarFileArg;
+    }
+
+    # add timestamp and archive extension, if not as is
+    if (!defined $tarFile)  {
+	$tarFile = $prefix;
+	if (!$options->{no_ts})  {
+	    $tarFile .= '-';
+	    if ($options->{use_utc_ts})  {
+		$tarFile .= $options->{utcTs};
+	    }  else  {
+		$tarFile .= $options->{localTs};
+	    }
+	}
+	$tarFile .= ".tar.gz";
+    }
+
+    return $tarFile;
+}
+
+
+# ValidateAndSynthesizeOptions
+#
+# Validate the options, and add to the options, the exclude list, dir,
+# dirDir, dirName, timestamps, and tar file path.
+#
+sub ValidateAndSynthesizeOptions
+{
+    my ($options, $argv) = @_;
+
+    # check for includes not in exclude list
+    my %excludes = map {$_ => 1} @{$options->{exclude}}, @excludes;
+    my @invalidIncludes = grep {!exists $excludes{$_}} @{$options->{include}};
+    FailAndExit("--include pattern fails to match an exclude pattern:  @invalidIncludes")
+	    if @invalidIncludes;
+
+    # create exclude pattern list
+    my %includes = map {$_ => 1} @{$options->{include}};
+    @{$options->{excludes}} = grep {!exists $includes{$_}}
+				    sort @excludes, @{$options->{exclude}};
+
+    # print exclude patterns if --help-excludes
+    if ($options->{help_excludes})  {
+	print +(join "\n", @{$options->{excludes}}), "\n";
+	exit 0;
+    }
+
+    # get timestamps
+    $options->{utcTs} = GetTsString(gmtime $options->{epochSecs}) . "Z";
+    $options->{localTs} = GetTsString(localtime $options->{epochSecs});
+
+    my $dirDir;
+    my $dirName;
+    my $dir = $argv->[0];
+    my $tarFileArg = $argv->[1];
+
+    # validate <dir-to-tar> is an existing directory
+    FailAndExit("dir-to-tar required as argument 1") unless defined $dir;
+    FailAndExit("dir-to-tar, '$dir', does not exist") unless -e $dir;
+    FailAndExit("dir-to-tar, '$dir', is not a directory") unless -d $dir;
+    FailAndExit("too many arguments") unless @$argv <= 2;
+    FailAndExit("second argument starts with '-', specify as ./$tarFileArg if needed")
+	    if defined $tarFileArg && $tarFileArg =~ /^-/;
+    
+    $dir =~ s/(\/\.)*$//;
+
+    if ($dir =~ /(?:\/|^)\.\.?$/)  {
+	$dir = Cwd::realpath($dir);
+    }
+
+    if ($dir =~ /^(?:(.*)\/)?([^\/]+)$/)  {
+	$dirDir = $1;
+	$dirDir = '.' unless defined $dirDir;
+	$dirName = $2;
+    }  else  {
+	FailAndExit("dir '$dir' one non-'/' character required.");
+    }
+
+    # get tar filename before further adjustments of dirName
+    my $tarFile = GetTarFilename($tarFileArg, $dirName, $options);
+
+    # if dir is symbolic link append /. to directory contents are archived
+    # instead of the link
+    $dirName .= '/.' if -l $dir;
+
+    # check for no top level directory
+    if ($options->{no_top_dir})  {
+	$dirDir .= "/$dirName";
+	$dirName = '.';
+    }
+
+    $options->{dir} = $dir;
+    $options->{dirDir} = $dirDir;
+    $options->{dirName} = $dirName;
+
+    # validate archive does not exist unless --force
+    FailAndExit("archive '$tarFile' exist,\n    not allowed unless --force specified.")
+	    if -e $tarFile && !$options->{force};
+
+    # create or truncate the archive
+    CreateTarPath($tarFile);
+
+    # validate archive directory exists and is writable
+    my ($tarFileDir) = ($tarFile =~ /^(.*\/)?/);
+    $tarFileDir = '.' unless defined $tarFileDir;
+    $tarFileDir =~ s/(.)\/$/$1/;
+    FailAndExit("directory '$tarFileDir' of archive '$tarFile' is not a directory")
+	    unless -d $tarFileDir;
+    FailAndExit("directory '$tarFileDir' of archive '$tarFile' is not writeable")
+	    unless -w $tarFileDir;
+    
+    $options->{tarFile} = $tarFile;
+}
+
+
+# ProcessOptions
+#
+# Process the command line options and arguments, synthesize value needed
+# by the program, validate results and handle the help and version options.
+# Returns the options
+#
+sub ProcessOptions
+{
+    my %options = (
+		exclude		=> [],
+		include		=> [],
+		excludes	=> [],
+		use_utc_ts	=> 0,
+		no_ts		=> 0,
+		no_top_dir	=> 0,
+		force		=> 0,
+		epochSecs	=> time(),
+                help            => 0,
+		help_excludes	=> 0,
+                version         => 0,
+		silent		=> 0,
+		verbose		=> 0,
+                );
+
+    my @options = (
+		"exclude|e=s@",
+		"include|i=s@",
+		"use_utc_ts|use-utc-ts|u!",
+		"no_ts|no-ts!",
+		"no_top_dir|no-top-dir|no_top_directory|no-top-directory!",
+		"force|f!",
+		"help|h!",
+		"help_excludes|help-excludes!",
+		"version|v!",
+		"silent|s!",
+		"verbose|V!",
+		);
+
+    Getopt::Long::Configure(qw/require_order no_ignore_case no_auto_abbrev/);
+    my $ok = GetOptions(\%options, @options);
+
+    # bad options check
+    if (!$ok)  {
+	FailAndExit("problem processing options");
+    }
+
+    # --help option
+    if ($options{help})  {
+        PrintUsage();
+        exit 0;
+    }
+
+    # --verbose option
+    if ($options{version})  {
+        PrintVersion();
+        exit 0;
+    }
+
+    # synthesize and --help-exclude options
+    ValidateAndSynthesizeOptions(\%options, \@ARGV);
+
+    return \%options
+}
+
+
+# ExecCmd
+#
+# Execute a command.  The arguments to the commend are passed as a list.
+# If the program exits with a non-zero exit status or via a signal, an
+# error is printed and the program exits.
+#
+sub ExecCmd
+{
+    my ($options, $cmd) = @_;
+
+    print GetCmdString($cmd) . "\n" if $options->{verbose};
+    
+    system @$cmd;
+
+    my $exitStatus = $?;
+    my $exitMsg = $!;
+
+    my $exitCode;
+    my $exitSignal;
+    my $exitSignalName;
+    my $exitErrorMsg;
+
+    if ($exitStatus == -1)  {
+	$exitErrorMsg = $exitMsg;
+    }  elsif ($exitStatus & 127)  {
+	$exitSignal = $exitStatus & 127;
+    my $sig = (split ' ', $Config{sig_name})[$exitSignal];
+	$exitSignalName = "SIG$sig" if defined $sig;
+    }  else  {
+	$exitCode = $exitStatus >> 8;
+    }
+
+    # check for failure, report and exit if detected
+    if ($exitStatus != 0)  {
+	my $s = GetCmdString($cmd) . " failed";
+	$s .= " with exitCode=$exitCode" if defined $exitCode;
+	$s .= " with signal" if defined $exitSignal || defined $exitSignalName;
+	$s .= " $exitSignalName" if defined $exitSignalName;
+	$s .= " $exitSignal" if defined $exitSignal;
+	$s .= " exec error ($exitErrorMsg)" if defined $exitErrorMsg;
+
+	FailAndExit($s);
+    }
+}
+
+
+# TarDir
+#
+# Create and execute the tar command to create an archive.
+#
+sub TarDir
+{
+    my ($options) = @_;
+    my ($dirDir, $dirName, $tarFile) = @{$options}{qw/dirDir dirName tarFile/};
+
+    # tar and create option
+    my @cmd = qw/ tar -c /;
+
+    # check of valid extension and add appropriate options for compression
+    if ($tarFile =~ /$tarExtPat/)  {
+	my $ext = $1;
+	if (exists $tarExtToFlags{$ext})  {
+	    push @cmd, @{$tarExtToFlags{$ext}};
+	}  else  {
+	    FailAndExit("tar-file, '$tarFile' must end with one of:  " . join ' ', keys %tarExtToFlags);
+	}
+    }  else  {
+	FailAndExit("tar-file, '$tarFile' must end with one of:  " . join ' ', keys %tarExtToFlags);
+    }
+
+    # add option for tar file location
+    push @cmd, '-f', $tarFile;
+
+    # add option for files to exclude
+    push @cmd, map { "--exclude=$_" } @{$options->{excludes}};
+
+    # add option to change to parent of directory to archive and dir to archive
+    push @cmd, '-C', $dirDir, $dirName;
+
+    # run tar command
+    ExecCmd($options, \@cmd);
+
+    # print path of archive unless --silent option
+    print "$options->{tarFile}\n" unless $options->{silent};
+}
+
+
+my $options = ProcessOptions();
+TarDir($options);
